@@ -9,7 +9,7 @@ import click
 
 # cisagov Libraries
 from navv.gui.app import app
-from navv.bll import get_inventory_report_df, get_snmp_df, get_zeek_df, get_mac_df
+from navv.bll import get_inventory_report_df, get_snmp_df, get_zeek_df, get_mac_df, get_ip_mac_map
 from navv.message_handler import success_msg, warning_msg
 from navv.spreadsheet_tools import (
     auto_adjust_width,
@@ -116,6 +116,13 @@ def generate(customer_name, output_dir, pcap, zeek_logs, geoip_db):
     inventory_df = get_inventory_report_df(zeek_df)
     mac_df = get_mac_df(zeek_df)
 
+    # Build IP → MAC/vendor lookup used to enrich the Unknown Internals sheet.
+    ip_mac_map = get_ip_mac_map(zeek_df)
+
+    # Build segment dict for O(1) lookup (mirrors the dict built inside
+    # perform_analysis; we need it here to pass to write_unknown_internals_sheet).
+    segment_dict = {seg.network: seg for seg in segments}
+
     # Turn zeekcut data into rows for spreadsheet
     rows = create_analysis_array(zeek_data, timer=timer_data)
 
@@ -141,7 +148,12 @@ def generate(customer_name, output_dir, pcap, zeek_logs, geoip_db):
 
     write_externals_sheet(ext_IPs, wb, geolocator=geolocator)
 
-    write_unknown_internals_sheet(unk_int_IPs, wb)
+    write_unknown_internals_sheet(
+        unk_int_IPs,
+        wb,
+        ip_mac_map=ip_mac_map,
+        segment_dict=segment_dict,
+    )
 
     write_snmp_sheet(snmp_df, wb)
 

@@ -67,6 +67,9 @@ UNKNOWN_EXTERNAL_CELL_COLOR = (
 )
 ALREADY_UNRESOLVED = list()
 
+# Default recommendation text written to every new unknown-internal row.
+UNKNOWN_INTERNAL_DEFAULT_RECOMMENDATION = "Investigate and Update Asset Inventory"
+
 @timeit
 def get_workbook(file_name):
     """Create the blank Inventory and Segment sheets for data input into the tool"""
@@ -181,6 +184,44 @@ def read_existing_notes(wb):
     
     info_msg(f"Found {len(notes_dict)} existing notes")
     return notes_dict
+
+
+def read_existing_unknown_internal_recommendations(wb):
+    """Read existing Recommendation values from the Unknown Internals sheet.
+
+    Returns a dict of {ip: recommendation_string} for every row whose
+    Recommendation cell differs from the default value (or for every row that
+    has *any* non-empty value, so we never silently drop custom text).
+
+    Column layout expected (1-indexed):
+        A – IP Address
+        B – MAC Address
+        C – Manufacturer
+        D – Network Segment
+        E – Recommendation
+    """
+    recs: dict = {}
+
+    if "Unknown Internals" not in wb.sheetnames:
+        return recs
+
+    sheet = wb["Unknown Internals"]
+    if sheet.max_row <= 1:
+        return recs
+
+    info_msg("Reading existing recommendations from Unknown Internals sheet...")
+
+    for row in sheet.iter_rows(min_row=2, max_row=sheet.max_row):
+        try:
+            ip = row[0].value          # Column A
+            recommendation = row[4].value  # Column E
+            if ip and recommendation:
+                recs[str(ip)] = str(recommendation)
+        except (IndexError, AttributeError):
+            continue
+
+    info_msg(f"Found {len(recs)} existing Unknown Internals recommendations")
+    return recs
 
 
 @timeit
@@ -598,14 +639,117 @@ def write_externals_sheet(IPs, wb, geolocator=None):
     auto_adjust_width(ext_sheet)
 
 
-def write_unknown_internals_sheet(IPs, wb):
+def write_unknown_internals_sheet(IPs, wb, ip_mac_map=None, segment_dict=None):
+    """Write the Unknown Internals sheet with enriched asset context.
+
+    Columns
+    -------
+    A  IP Address
+    B  MAC Address
+    C  Manufacturer
+    D  Network Segment
+    E  Recommendation   <- default text; user edits are preserved across runs
+
+    Parameters
+    ----------
+    IPs : set
+        Set of unknown internal IP address strings populated during analysis.
+    wb : openpyxl.Workbook
+        The open workbook being built.
+    ip_mac_map : dict, optional
+        Mapping of {ip: {"mac": str, "vendor": str}} produced by
+        ``bll.get_ip_mac_map``.  When absent, MAC/vendor columns are empty.
+    segment_dict : dict, optional
+        Mapping of {ip: Segment} produced by converting the segments list from
+        ``get_segments_data``.  When absent, segment column is empty.
+    """
+    if ip_mac_map is None:
+        ip_mac_map = {}
+    if segment_dict is None:
+        segment_dict = {}
+
+    # Persist any recommendation text the analyst has already entered.
+    existing_recs = read_existing_unknown_internal_recommendations(wb)
+
     int_sheet = make_sheet(wb, "Unknown Internals", idx=6)
-    int_sheet.append(["Unknown Internal IP"])
+    int_sheet.append(
+        ["IP Address", "MAC Address", "Manufacturer", "Network Segment", "Recommendation"]
+    )
+
+    # -- Theme color definitions -----------------------------------------------
+    # Office theme indices: lt1=0, dk1=1, lt2=2, dk2=3, accent1=4 ... accent6=9
+    # Tint values match what Excel writes into XML for named shade variants.
+    #
+    #   Header fill  : Accent 1, Darker 50%   -> theme=4, tint=-0.499984740745262
+    #   Header text  : Background 2 (lt2)     -> theme=2, tint=0.0
+    #   Row fill     : Blue-grey Text 2,
+    #                  Lighter 80%            -> theme=3, tint=0.799981688894314
+    from openpyxl.styles.colors import Color as _Color
+
+    _header_fill = openpyxl.styles.PatternFill(
+        "solid",
+        fgColor=_Color(theme=4, tint=-0.499984740745262),
+    )
+    _header_font = openpyxl.styles.Font(
+        name="Calibri",
+        size=10,
+        bold=True,
+        color=_Color(theme=2, tint=0.0),
+    )
+    _row_font = openpyxl.styles.Font(
+        name="Calibri",
+        size=9,
+    )
+    _thin_border = openpyxl.styles.Border(
+        left=openpyxl.styles.Side(style="thin"),
+        right=openpyxl.styles.Side(style="thin"),
+        top=openpyxl.styles.Side(style="thin"),
+        bottom=openpyxl.styles.Side(style="thin"),
+    )
+
+    # Style the header row.
+    for col_idx in range(1, 6):
+        cell = int_sheet.cell(row=1, column=col_idx)
+        cell.font = _header_font
+        cell.fill = _header_fill
+        cell.border = _thin_border
+
     for row_index, IP in enumerate(sorted(IPs), start=2):
-        cell = int_sheet[f"A{row_index}"]
-        cell.value = IP
-        if row_index % 2 == 0:
-            cell.fill = openpyxl.styles.PatternFill("solid", fgColor="AAAAAA")
+        # -- IP Address --------------------------------------------------------
+        int_sheet.cell(row=row_index, column=1, value=IP)
+
+        # -- MAC Address -------------------------------------------------------
+        mac_info = ip_mac_map.get(IP, {})
+        mac = mac_info.get("mac", "")
+        int_sheet.cell(row=row_index, column=2, value=mac)
+
+        # -- Manufacturer ------------------------------------------------------
+        vendor = mac_info.get("vendor", "")
+        int_sheet.cell(row=row_index, column=3, value=vendor)
+
+        # -- Network Segment ---------------------------------------------------
+        segment = segment_dict.get(IP)
+        segment_name = segment.name if segment else "No network segment defined"
+        int_sheet.cell(row=row_index, column=4, value=segment_name)
+
+        # -- Recommendation ----------------------------------------------------
+        # Use whatever the analyst saved on a previous run; fall back to the
+        # default text for brand-new IPs.
+        recommendation = existing_recs.get(
+            IP, UNKNOWN_INTERNAL_DEFAULT_RECOMMENDATION
+        )
+        int_sheet.cell(row=row_index, column=5, value=recommendation)
+
+        # Apply font and border to all five columns.
+        for col_idx in range(1, 6):
+            cell = int_sheet.cell(row=row_index, column=col_idx)
+            cell.font = _row_font
+            cell.border = _thin_border
+
+    # Enable AutoFilter so analysts can slice by segment, vendor, etc.
+    if IPs:
+        int_sheet.auto_filter.ref = f"A1:E{len(IPs) + 1}"
+
     auto_adjust_width(int_sheet)
 
 

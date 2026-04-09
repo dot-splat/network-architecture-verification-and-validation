@@ -33,6 +33,34 @@ def get_zeek_df(zeek_data: list, dns_data: dict):
     )
 
 
+def get_ip_mac_map(zeek_df: pd.DataFrame) -> dict:
+    """Return a dict of {ip: {"mac": str, "vendor": str}} built from conn.log zeek data.
+
+    When multiple MACs are seen for the same IP (rare but possible due to ARP
+    changes during a capture), the most-recently-seen MAC wins.  The result is
+    used to enrich the Unknown Internals sheet with hardware context.
+    """
+    mac_vendors = {}
+    with open(MAC_VENDORS_JSON_FILE) as f:
+        mac_vendors = json.load(f)
+
+    ip_mac: dict = {}
+
+    for _, row in zeek_df.iterrows():
+        for ip_col, mac_col in (("src_ip", "src_mac"), ("dst_ip", "dst_mac")):
+            ip = row.get(ip_col, "")
+            mac = row.get(mac_col, "")
+            if ip and mac:
+                ip_mac[ip] = mac  # last write wins — good enough for enrichment
+
+    result = {}
+    for ip, mac in ip_mac.items():
+        vendor = get_mac_vendor(mac_vendors, mac) if mac else "Unknown Vendor"
+        result[ip] = {"mac": mac, "vendor": vendor}
+
+    return result
+
+
 @timeit
 def get_inventory_report_df(zeek_df: pd.DataFrame):
     """Return a pandas dataframe of the inventory report data."""
